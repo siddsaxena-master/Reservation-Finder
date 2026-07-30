@@ -11,7 +11,10 @@ import { mainLoop, runCycle, buildStatusText } from './monitor.js';
 import { pollUpdates, sendMessage, setChatId, getChatId, telegramConfigured, getMe } from './telegram.js';
 import { closeBrowser } from './browser.js';
 
-async function telegramCommandLoop() {
+// NOTE: `state` is the SAME object the polling loop mutates — both loops
+// share it and saves serialize the shared object, so neither loop can
+// clobber the other's writes (single-threaded event loop, no torn state).
+async function telegramCommandLoop(state) {
   if (!telegramConfigured()) {
     log.warn('TELEGRAM_BOT_TOKEN not set — alerts will only appear in logs');
     return;
@@ -23,31 +26,25 @@ async function telegramCommandLoop() {
     log.error(`telegram getMe failed — check TELEGRAM_BOT_TOKEN: ${e.message}`);
     return;
   }
-  const state = loadState();
   if (state.chatId) setChatId(state.chatId);
-  let offset = state.telegramUpdateOffset || 0;
 
   for (;;) {
-    offset = await pollUpdates(offset, async (text, chatId) => {
+    const offset = await pollUpdates(state.telegramUpdateOffset || 0, async (text, chatId) => {
       const bound = getChatId();
       if (!bound) {
         // First contact binds the chat. (Single-user bot by design.)
         setChatId(chatId);
-        const st = loadState();
-        st.chatId = String(chatId);
-        saveState(st);
+        state.chatId = String(chatId);
         log.info(`bound telegram chat ${chatId}`);
         await sendMessage(
           `👋 Connected. This chat will now receive ${config.movieTitle} ${config.formatDisplay} seat alerts for ${config.theatreName}.\nCommands: /status /help`
         );
-        if (!/^\/start/.test(text)) return;
         return;
       }
       if (String(chatId) !== String(bound)) return; // ignore strangers
 
       if (/^\/status/i.test(text)) {
-        const st = loadState();
-        await sendMessage(buildStatusText(st));
+        await sendMessage(buildStatusText(state));
       } else if (/^\/help|^\/start/i.test(text)) {
         await sendMessage(
           `Monitoring <b>${config.movieTitle}</b> in <b>${config.formatDisplay}</b> at ${config.theatreName}.\n` +
@@ -57,21 +54,18 @@ async function telegramCommandLoop() {
         );
       }
     });
-    // persist the update offset so restarts don't replay old commands
-    const st = loadState();
-    if (offset !== st.telegramUpdateOffset || (getChatId() && st.chatId !== getChatId())) {
-      st.telegramUpdateOffset = offset;
-      if (getChatId()) st.chatId = String(getChatId());
-      saveState(st);
+    if (offset !== state.telegramUpdateOffset) {
+      state.telegramUpdateOffset = offset;
+      saveState(state); // persist so restarts don't replay old commands
     }
   }
 }
 
 async function main() {
   log.info(`amc-70mm-monitor starting: ${describeConfig()}`);
+  const state = loadState();
 
   if (process.argv.includes('--once')) {
-    const state = loadState();
     try {
       await runCycle(state, 1);
     } finally {
@@ -81,10 +75,10 @@ async function main() {
     return;
   }
 
-  // Run the Telegram listener and the polling loop concurrently. Each loop
-  // catches its own errors; Promise.all here only ends on a truly fatal bug,
-  // which systemd's Restart=always then handles.
-  await Promise.all([mainLoop(), telegramCommandLoop()]);
+  // Run the Telegram listener and the polling loop concurrently over ONE
+  // shared state object. Each loop catches its own errors; Promise.all here
+  // only ends on a truly fatal bug, which systemd's Restart=always handles.
+  await Promise.all([mainLoop(state), telegramCommandLoop(state)]);
 }
 
 main().catch(async (e) => {

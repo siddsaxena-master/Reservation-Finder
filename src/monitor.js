@@ -186,6 +186,7 @@ export async function runCycle(state, cycleNum) {
         soldOutSince: s.status === 'SOLD_OUT' ? now : null,
         lastAlertAt: 0,
         lastAlertSeats: 0,
+        lastConfirm0At: 0,
         missCount: 0,
         removed: false,
       };
@@ -244,6 +245,14 @@ export async function runCycle(state, cycleNum) {
       confirmed.push(rec); // can't pull a seat map without an id; alert on badge alone
       continue;
     }
+    // "Ghost" shows (listing says available, seat map says 0 on sale) would
+    // otherwise re-trigger a seat-map fetch every cycle — a rate-limit hazard.
+    // After a 0-seat confirmation, trust it for the cooldown window.
+    if (rec.lastConfirm0At && now - rec.lastConfirm0At < config.realertCooldownMs) {
+      rec.status = 'SOLD_OUT';
+      rec.availableSeats = 0;
+      continue;
+    }
     await sleep(config.intraCycleDelayMs);
     const idNum = /(\d+)/.exec(rec.id)?.[1];
     try {
@@ -252,11 +261,14 @@ export async function runCycle(state, cycleNum) {
         rec.availableSeats = seatMap.available;
         rec.seatNames = seatMap.seatNames;
         log.info(`seat map ${rec.id}: ${seatMap.available}/${seatMap.total} open via ${seatMap.source}`);
-        if (seatMap.available > 0) confirmed.push(rec);
-        else {
-          // listing badge was stale/racy — treat as still sold out
+        if (seatMap.available > 0) {
+          rec.lastConfirm0At = 0;
+          confirmed.push(rec);
+        } else {
+          // listing badge stale/racy or show not actually on sale
           rec.status = 'SOLD_OUT';
           rec.availableSeats = 0;
+          rec.lastConfirm0At = now;
         }
       } else {
         confirmed.push(rec); // parser broke: trust the listing badge, alert anyway
@@ -365,8 +377,7 @@ export async function maybeDailySummary(state) {
 
 // ---- main loop ----------------------------------------------------------------
 
-export async function mainLoop() {
-  const state = loadState();
+export async function mainLoop(state) {
   let cycle = 0;
   let backoffMs = 0;
   let consecutiveFailures = 0;

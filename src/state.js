@@ -64,4 +64,6 @@ export function saveState(state) {
 //   seatNames: string[]|null,
 //   firstSeenAt, lastSeenAt, soldOutSince: ms epoch | null,
 //   lastAlertAt: 0, lastAlertSeats: 0,
+//   lastConfirm0At: 0,   (last time a seat map confirmed 0 seats on sale)
+//   missCount: 0, removed: false,
 // }
