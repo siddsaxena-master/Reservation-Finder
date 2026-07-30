@@ -35,24 +35,36 @@ function classifyBlock(status, bodyText, title) {
   return null;
 }
 
-// AMC fronts busy pages with a Queue-it waiting room ("Global Safety Net").
-// With no real event running it auto-advances in seconds and drops a cookie
-// that exempts the rest of the browser session — so we wait it out (capped)
-// instead of failing the cycle.
+// AMC fronts busy pages with a Queue-it waiting room ("Global Safety Net"),
+// served from queue.amctheatres.com (and *.queue-it.net). With no real event
+// running it auto-advances in seconds and drops a cookie that exempts the
+// rest of the browser session — so we wait it out (capped) instead of failing
+// the cycle. NOTE: match on the HOSTNAME — the queue host is itself a
+// subdomain of amctheatres.com, so substring checks on the URL are not enough.
+function isQueueUrl(url) {
+  try {
+    const host = new URL(String(url)).hostname;
+    return /(^|\.)queue[.-]/i.test(host) || /queue-it\.net$/i.test(host);
+  } catch {
+    return false;
+  }
+}
+
 function looksLikeQueue(url, title) {
-  return /queue-it\.net/i.test(url) || /^queue-it/i.test(title || '');
+  return isQueueUrl(url) || /^queue-it/i.test(title || '');
 }
 
 async function waitOutQueue(page) {
-  log.warn(`Queue-it waiting room hit at ${page.url()} — waiting up to ${config.queueWaitMs / 1000}s for release`);
+  log.warn(`Queue-it waiting room hit at ${page.url().slice(0, 120)} — waiting up to ${config.queueWaitMs / 1000}s for release`);
   try {
-    await page.waitForURL((u) => /amctheatres\.com/.test(String(u)) && !/queue-it/i.test(String(u)), {
+    await page.waitForURL((u) => /(^|\.)amctheatres\.com$/i.test(new URL(String(u)).hostname) && !isQueueUrl(u), {
       timeout: config.queueWaitMs,
     });
     await page.waitForTimeout(config.settleMs);
-    log.info('Queue-it released us back to the site');
+    log.info(`Queue-it released us to ${page.url().slice(0, 100)}`);
     return true;
   } catch {
+    log.warn('Queue-it did not release us within the wait budget');
     return false;
   }
 }
@@ -368,10 +380,32 @@ export async function fetchSeatMap(showtimeId) {
     }
     if (!result) {
       log.warn(`seat map ${showtimeId}: could not parse seats from DOM or payloads (${payloads.length})`);
+      await debugDump(page, `seats-${showtimeId}`);
       return null;
     }
     return { ...result, url };
   } finally {
     await page.close().catch(() => {});
+  }
+}
+
+// On parse failures, keep the rendered HTML so the parser can be fixed against
+// reality (see tools/parse-fixture.mjs). Bounded to the 5 most recent dumps.
+async function debugDump(page, tag) {
+  try {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const dir = path.join(config.root, 'data', 'debug');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${tag}-${new Date().toISOString().replace(/[:.]/g, '-')}.html`);
+    fs.writeFileSync(file, await page.content());
+    const dumps = fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.html'))
+      .sort();
+    for (const old of dumps.slice(0, -5)) fs.unlinkSync(path.join(dir, old));
+    log.info(`debug dump saved: ${file}`);
+  } catch (e) {
+    log.debug(`debug dump failed: ${e.message}`);
   }
 }
