@@ -34,6 +34,15 @@ function addDaysISO(dateISO, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// "2:00am" -> 120, "10:00pm" -> 1320. Unparseable times sort last.
+export function timeMinutes(timeText) {
+  const m = /^(\d{1,2}):(\d{2})\s*(am|pm)$/i.exec((timeText || '').trim());
+  if (!m) return 24 * 60;
+  let h = parseInt(m[1], 10) % 12;
+  if (/pm/i.test(m[3])) h += 12;
+  return h * 60 + parseInt(m[2], 10);
+}
+
 export function prettyWhen(dateISO, timeText) {
   const d = new Date(`${dateISO}T12:00:00Z`);
   const label = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
@@ -79,7 +88,7 @@ export function buildStatusText(state) {
   const { dateISO: today } = theatreNowParts();
   const recs = Object.values(state.showtimes)
     .filter((r) => r.date >= today && !r.removed)
-    .sort((a, b) => (a.date + a.timeText).localeCompare(b.date + b.timeText));
+    .sort((a, b) => a.date.localeCompare(b.date) || timeMinutes(a.timeText) - timeMinutes(b.timeText));
   if (!recs.length) {
     return `📽 <b>${escapeHtml(config.movieTitle)} — ${escapeHtml(config.formatDisplay)}</b>\nNo upcoming ${escapeHtml(
       config.formatDisplay
