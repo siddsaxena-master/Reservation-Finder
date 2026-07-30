@@ -1,0 +1,41 @@
+# Secrets & local config — never commit
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials*
+secrets*
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+build/
+*.tsbuildinfo
+
+# Runtime state & local databases
+data/
+*.sqlite
+*.sqlite3
+*.db
+state.json
+
+# Logs
+logs/
+*.log
+
+# Playwright
+test-results/
+playwright-report/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Scratch / probe files
+dump.mjs
+probe*.mjs
