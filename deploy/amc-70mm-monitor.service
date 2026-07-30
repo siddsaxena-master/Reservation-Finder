@@ -1,0 +1,32 @@
+[Unit]
+Description=AMC IMAX 70mm seat-availability monitor (Telegram alerts)
+Documentation=https://github.com/siddsaxena-master/Reservation-Finder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# install.sh substitutes the real path + user at install time
+WorkingDirectory=__APP_DIR__
+User=__APP_USER__
+ExecStart=/usr/bin/env node src/index.js
+Restart=always
+RestartSec=10
+# journald captures stdout/stderr; view with: journalctl -u amc-70mm-monitor -f
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+# .env in the working directory supplies TELEGRAM_BOT_TOKEN etc.
+
+# Hardening (safe for this workload)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=__APP_DIR__
+
+# Chromium can spike; keep the droplet responsive
+MemoryMax=1500M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

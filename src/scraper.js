@@ -35,6 +35,28 @@ function classifyBlock(status, bodyText, title) {
   return null;
 }
 
+// AMC fronts busy pages with a Queue-it waiting room ("Global Safety Net").
+// With no real event running it auto-advances in seconds and drops a cookie
+// that exempts the rest of the browser session — so we wait it out (capped)
+// instead of failing the cycle.
+function looksLikeQueue(url, title) {
+  return /queue-it\.net/i.test(url) || /^queue-it/i.test(title || '');
+}
+
+async function waitOutQueue(page) {
+  log.warn(`Queue-it waiting room hit at ${page.url()} — waiting up to ${config.queueWaitMs / 1000}s for release`);
+  try {
+    await page.waitForURL((u) => /amctheatres\.com/.test(String(u)) && !/queue-it/i.test(String(u)), {
+      timeout: config.queueWaitMs,
+    });
+    await page.waitForTimeout(config.settleMs);
+    log.info('Queue-it released us back to the site');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function openPage(url) {
   const ctx = await getContext();
   const page = await ctx.newPage();
@@ -54,7 +76,17 @@ async function openPage(url) {
   const resp = await page.goto(url, { waitUntil: 'domcontentloaded' });
   status = resp ? resp.status() : 0;
   await page.waitForTimeout(config.settleMs);
-  const title = await page.title().catch(() => '');
+  let title = await page.title().catch(() => '');
+
+  if (looksLikeQueue(page.url(), title)) {
+    const released = await waitOutQueue(page);
+    if (!released) {
+      await page.close().catch(() => {});
+      throw new BlockedError(status || 302, 'queue');
+    }
+    title = await page.title().catch(() => '');
+  }
+
   const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
   const blocked = classifyBlock(status, bodyText, title);
   if (blocked) {
@@ -74,104 +106,111 @@ export function listingUrl(dateISO) {
   return u.toString();
 }
 
-// Runs in the page. Returns every showtime entry with enough context to filter
-// by movie and format on the Node side. Sold-out shows may render as
-// non-anchor elements, so both anchors and disabled buttons are collected.
-function extractListingInPage() {
+// Runs in the page. Extracts every showtime with its movie + format context.
+//
+// AMC's listing markup (verified 2026-07 against the live site) is strongly
+// semantic — we lean on ARIA structure rather than styling classes:
+//
+//   <section aria-label="Showtimes for The Odyssey">
+//     <li role="listitem" aria-label="IMAX 70MM Showtimes">
+//       <h3><span>IMAX 70MM</span> …</h3>
+//       <ul aria-label="Showtime Group Results">
+//         <li><div role="group">
+//           <a href="/showtimes/143822207"
+//              aria-describedby="the-odyssey-76238 … …-imax70mm-0 …">
+//             <time>10:00pm</time><span class="sr-only">Almost Full</span>
+//           </a>
+//           <div aria-hidden="true">…<span>Almost Full</span>…</div>
+//         </div></li>
+//       </ul>
+//     </li>
+//     <li role="listitem" aria-label="Laser at AMC Showtimes">…</li>
+//   </section>
+//
+// Sold-out shows may render without an anchor, so any group item containing a
+// <time> is captured even when no href is present.
+// Exported so tools/parse-fixture.mjs can exercise it against saved HTML.
+export function extractListingInPage() {
   const results = [];
   const formatLabelsSeen = new Set();
 
-  const timeRe = /^\s*\d{1,2}:\d{2}\s*(am|pm)\s*$/i;
-  const isVisible = (el) => {
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
+  const formatLabelOf = (el) => {
+    const li = el.closest('li[role="listitem"][aria-label]');
+    if (li) {
+      const aria = li.getAttribute('aria-label') || '';
+      const m = /^(.*?)\s*showtimes?$/i.exec(aria.trim());
+      if (m && m[1]) return m[1].trim();
+      if (aria.trim()) return aria.trim();
+    }
+    // Fallback: nearest h3's first span (the format heading)
+    const h3 = el.closest('li,section')?.querySelector('h3 span');
+    return h3 ? h3.textContent.trim() : null;
   };
 
-  // Candidate showtime elements: anchors to /showtimes/<id> plus button-ish
-  // elements whose first text line is a bare time (sold-out renders).
+  const movieContextOf = (el) => {
+    const section = el.closest('section[aria-label]');
+    const sectionLabel = section ? section.getAttribute('aria-label') : null;
+    const movieLink = section?.querySelector('a[href*="/movies/"]');
+    return {
+      sectionLabel, // e.g. "Showtimes for The Odyssey"
+      movieHref: movieLink ? movieLink.getAttribute('href') : null,
+      describedby: el.getAttribute?.('aria-describedby') || '',
+    };
+  };
+
+  // Primary: real showtime anchors.
   const anchors = [...document.querySelectorAll('a[href*="/showtimes/"]')].filter((a) =>
-    /\/showtimes\/\d+/.test(a.href)
+    /\/showtimes\/\d+/.test(a.getAttribute('href') || '')
   );
-  const buttons = [...document.querySelectorAll('button,[role="button"],div,span')].filter((el) => {
-    if (el.querySelector('a')) return false;
-    const first = (el.innerText || '').trim().split('\n')[0] || '';
-    if (!timeRe.test(first)) return false;
-    // must not be inside one of the anchors we already have
-    return !el.closest('a[href*="/showtimes/"]');
-  });
-  // De-dup nested button-ish matches: keep outermost carrying same text
-  const outerButtons = buttons.filter((el) => !buttons.some((o) => o !== el && o.contains(el)));
+  // Secondary: group items with a <time> but no anchor (sold-out rendering).
+  const groups = [...document.querySelectorAll('div[role="group"], ul[aria-label*="Showtime Group" i] > li')].filter(
+    (g) => g.querySelector('time') && !g.querySelector('a[href*="/showtimes/"]')
+  );
 
-  const candidates = [
-    ...anchors.map((a) => ({ el: a, href: a.href })),
-    ...outerButtons.map((b) => ({ el: b, href: null })),
-  ];
+  const record = (el, href) => {
+    const timeEl = el.querySelector('time') || (el.tagName === 'TIME' ? el : null);
+    const timeText = (timeEl ? timeEl.textContent : (el.textContent || '').split('\n')[0] || '')
+      .replace(/\s+/g, '')
+      .toLowerCase();
+    if (!/^\d{1,2}:\d{2}(am|pm)$/.test(timeText)) return;
 
-  for (const { el, href } of candidates) {
-    if (!isVisible(el)) continue;
-    // Movie block: nearest ancestor that contains a /movies/ link.
-    let movieHref = null;
-    let block = el.parentElement;
-    while (block && block !== document.body) {
-      const link = block.querySelector('a[href*="/movies/"]');
-      if (link) {
-        movieHref = link.getAttribute('href');
-        break;
-      }
-      block = block.parentElement;
-    }
-    if (!block || block === document.body) continue;
+    const { sectionLabel, movieHref, describedby } = movieContextOf(el);
+    const formatLabel = formatLabelOf(el);
+    if (formatLabel) formatLabelsSeen.add(formatLabel);
 
-    // Format heading: last "labelish" element before this showtime within the
-    // movie block. Labelish = short, no digits-only, mostly uppercase text in
-    // its own element (AMC renders format group names like "IMAX 70MM",
-    // "LASER AT AMC" as standalone headings, often linked).
-    let formatLabel = null;
-    const walker = document.createTreeWalker(block, NodeFilter.SHOW_ELEMENT);
-    const labelish = [];
-    while (walker.nextNode()) {
-      const n = walker.currentNode;
-      if (n === el || n.contains(el)) break; // stop once we reach our showtime
-      if (!isVisible(n)) continue;
-      const own = [...n.childNodes]
-        .filter((c) => c.nodeType === Node.TEXT_NODE)
-        .map((c) => c.textContent.trim())
-        .join(' ')
-        .trim();
-      if (!own || own.length < 3 || own.length > 40) continue;
-      if (timeRe.test(own)) continue;
-      const letters = own.replace(/[^A-Za-z]/g, '');
-      if (letters.length < 3) continue;
-      const upper = own.replace(/[^A-Z]/g, '').length;
-      if (upper / letters.length < 0.8) continue; // headings are (nearly) all caps
-      labelish.push(own);
-    }
-    if (labelish.length) formatLabel = labelish[labelish.length - 1];
-    for (const l of labelish) formatLabelsSeen.add(l);
-
-    const lines = (el.innerText || '')
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const timeText = lines[0] || '';
-    const rest = lines.slice(1).join(' ');
-    // Badge may also live in a sibling annotation right after the element.
-    const sibText = (el.parentElement?.innerText || '').slice(0, 200);
-    const badgeSource = `${rest} ${sibText}`;
+    // Badge lives in the anchor's sr-only span and/or the sibling badge <div>.
+    const holder = el.closest('div[role="group"]') || el.parentElement || el;
+    const badgeText = (holder.textContent || '').replace(timeEl ? timeEl.textContent : '', ' ');
     let badge = null;
-    if (/sold\s*out/i.test(badgeSource)) badge = 'SOLD_OUT';
-    else if (/almost\s*full/i.test(badgeSource)) badge = 'ALMOST_FULL';
+    if (/sold\s*out/i.test(badgeText)) badge = 'SOLD_OUT';
+    else if (/almost\s*full/i.test(badgeText)) badge = 'ALMOST_FULL';
 
     results.push({
       href,
       movieHref,
+      sectionLabel,
+      describedby,
       formatLabel,
       timeText,
       badge,
-      disabled: href === null || el.getAttribute('aria-disabled') === 'true',
+      disabled: href === null,
     });
-  }
-  return { entries: results, formatLabelsSeen: [...formatLabelsSeen] };
+  };
+
+  for (const a of anchors) record(a, a.getAttribute('href'));
+  for (const g of groups) record(g, null);
+
+  // The date <select> lists every bookable date at this theatre — the
+  // schedule horizon in one page load.
+  const pickerDates = [
+    ...new Set(
+      [...document.querySelectorAll('select option')]
+        .map((o) => o.getAttribute('value') || '')
+        .filter((v) => /^\d{4}-\d{2}-\d{2}$/.test(v))
+    ),
+  ];
+
+  return { entries: results, formatLabelsSeen: [...formatLabelsSeen], pickerDates };
 }
 
 export async function fetchListing(dateISO) {
@@ -179,19 +218,17 @@ export async function fetchListing(dateISO) {
   const { page } = await openPage(url);
   try {
     const raw = await page.evaluate(extractListingInPage);
-    // Available dates from the date picker (?date=YYYY-MM-DD links), so the
-    // monitor can learn the schedule horizon from a single page.
-    const pickerDates = await page.evaluate(() => {
-      const out = new Set();
-      for (const a of document.querySelectorAll('a[href*="date="]')) {
-        const m = /[?&]date=(\d{4}-\d{2}-\d{2})/.exec(a.getAttribute('href') || '');
-        if (m) out.add(m[1]);
-      }
-      return [...out];
-    });
+    const pickerDates = raw.pickerDates || [];
 
     const all = raw.entries;
-    const movieEntries = all.filter((e) => e.movieHref && config.movieSlugPattern.test(e.movieHref));
+    // Movie match, most-specific first: the aria-describedby tokens on each
+    // showtime carry the movie slug; the enclosing <section aria-label>
+    // carries the title; the section header links to /movies/<slug>.
+    const isOurMovie = (e) =>
+      (e.describedby && config.movieSlugPattern.test(e.describedby)) ||
+      (e.movieHref && config.movieSlugPattern.test(e.movieHref)) ||
+      (e.sectionLabel && new RegExp(config.movieTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(e.sectionLabel));
+    const movieEntries = all.filter(isOurMovie);
     const matched = movieEntries.filter((e) => e.formatLabel && config.formatPattern.test(e.formatLabel));
 
     // Format-label drift detection: the movie is on the page, some of its

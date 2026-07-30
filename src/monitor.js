@@ -123,14 +123,23 @@ export function planDates(state) {
     const take = Math.min(rest.length, Math.max(0, config.maxPagesPerCycle - 1 - config.horizonProbesPerCycle));
     for (let i = 0; i < take; i++) plan.push(rest[(state.horizonCursor + i) % rest.length]);
   }
-  // 3) horizon probes: dates in lookahead window that are NOT active, to catch
-  //    new date ranges. Rotates via the same cursor.
+  // 3) horizon probes: bookable dates in the lookahead window that are NOT
+  //    active, to catch new date ranges. Rotates via the same cursor. The
+  //    theatre's own date picker (when we've seen it) bounds the candidates.
+  const picker = Array.isArray(state.pickerDates) ? state.pickerDates : [];
   const horizon = [];
   for (let i = 0; i <= config.lookaheadDays; i++) {
     const d = addDaysISO(today, i);
-    if (!active.includes(d)) horizon.push(d);
+    if (active.includes(d)) continue;
+    // "Today" is an empty-value option in AMC's picker, so it never appears in
+    // pickerDates — always keep it probeable.
+    if (picker.length && !picker.includes(d) && d !== today) continue;
+    horizon.push(d);
   }
-  for (let i = 0; i < config.horizonProbesPerCycle && horizon.length; i++) {
+  // Fresh install (no known showtimes yet): use the whole page budget to map
+  // the schedule quickly instead of one probe per cycle.
+  const probeCount = active.length ? config.horizonProbesPerCycle : Math.max(1, config.maxPagesPerCycle - plan.length);
+  for (let i = 0; i < probeCount && horizon.length; i++) {
     plan.push(horizon[(state.horizonCursor + i) % horizon.length]);
   }
   // If we know nothing at all yet, at least scan today.
@@ -142,6 +151,7 @@ export function planDates(state) {
 
 export async function runCycle(state, cycleNum) {
   const t0 = Date.now();
+  const activeBefore = new Set(state.activeDates);
   const dates = planDates(state);
   const seen = new Map(); // id -> fresh showtime object
   const checkedDates = [];
@@ -218,11 +228,14 @@ export async function runCycle(state, cycleNum) {
     }
   }
 
-  // --- learn active dates ---
+  // --- learn active dates (dates where we've SEEN our 70mm showtimes) ---
   const withShows = new Set(Object.values(state.showtimes).filter((r) => !r.removed).map((r) => r.date));
-  for (const d of pickerDates) if (d) withShows.add(d); // picker knows the horizon; cheap to include
   state.activeDates = [...withShows].sort();
-  state.horizonCursor = (state.horizonCursor + Math.max(1, config.horizonProbesPerCycle)) % 1000;
+  // The theatre's date <select> tells us which dates are bookable at all;
+  // horizon probing is limited to those (deduped, bounded by lookahead).
+  if (pickerDates.length) state.pickerDates = [...new Set(pickerDates)].sort();
+  const probesUsed = checkedDates.filter((d) => !activeBefore.has(d)).length;
+  state.horizonCursor = (state.horizonCursor + Math.max(1, probesUsed)) % 1000;
 
   // --- confirm seat-open transitions with a real seat map (max 2 per cycle) ---
   const confirmed = [];
@@ -336,6 +349,12 @@ export async function runCycle(state, cycleNum) {
 
 export async function maybeDailySummary(state) {
   const { dateISO, hour } = theatreNowParts();
+  if (!state.lastDailySummaryOn) {
+    // First run: don't fire a "daily" summary at whatever hour we started —
+    // the startup message already reported the picture.
+    state.lastDailySummaryOn = dateISO;
+    return;
+  }
   if (hour < config.dailySummaryHour) return;
   if (state.lastDailySummaryOn === dateISO) return;
   state.lastDailySummaryOn = dateISO;

@@ -48,9 +48,11 @@ export const config = {
   // Labels that look 70mm-adjacent. If we see one of these but nothing matching
   // formatPattern, the label text probably changed silently -> warn.
   formatDriftPattern: new RegExp(env('FORMAT_DRIFT_PATTERN', '70\\s*MM|IMAX'), 'i'),
-  // Labels to explicitly ignore even though they match the drift pattern
-  // (known non-70mm premium formats; keeps drift warnings quiet).
-  knownOtherFormats: new RegExp(env('KNOWN_OTHER_FORMATS', 'LASER|DOLBY|PRIME|GRAND|RPX|70MM FILM AT AMC$'), 'i'),
+  // Labels to explicitly ignore even though they match the drift pattern.
+  // Note "^70mm$": Lincoln Square also runs plain (non-IMAX) 70mm film — a
+  // real separate format we intentionally don't watch. To watch BOTH, set
+  // FORMAT_PATTERN='^(IMAX\s*)?70\s*MM$' in .env.
+  knownOtherFormats: new RegExp(env('KNOWN_OTHER_FORMATS', 'LASER|DOLBY|PRIME|GRAND|RPX|^70\\s*MM$'), 'i'),
 
   // ---- Date scanning --------------------------------------------------------
   // How many days ahead to look for showtimes/new date ranges.
@@ -70,6 +72,8 @@ export const config = {
   // Exponential backoff after 429/503/Cloudflare blocks. Cap per spec: 15 min.
   backoffBaseMs: envInt('BACKOFF_BASE_MS', 120_000),
   backoffMaxMs: envInt('BACKOFF_MAX_MS', 900_000),
+  // Max time to sit in AMC's Queue-it waiting room before calling it blocked.
+  queueWaitMs: envInt('QUEUE_WAIT_MS', 90_000),
 
   // ---- Alerting -------------------------------------------------------------
   // Suppress duplicate alerts for the same showtime for this long, unless the

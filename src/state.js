@@ -17,6 +17,8 @@ const EMPTY = {
   showtimes: {},
   // ISO dates (theatre-local) that had 70mm showtimes last time we looked
   activeDates: [],
+  // ISO dates the theatre's date picker offers (bounds horizon probing)
+  pickerDates: [],
   // Round-robin cursor for horizon scanning
   horizonCursor: 0,
   // Breakage bookkeeping
