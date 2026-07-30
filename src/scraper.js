@@ -318,22 +318,35 @@ function seatsFromPayloads(payloads) {
   return { total: best.length, available: open.length, seatNames: open.map((s) => s.name).sort(), source: 'payload' };
 }
 
-// DOM fallback: count seat-shaped controls by accessibility attributes.
+// DOM parsing — the PRIMARY seat source in practice. AMC's seats page
+// server-renders the whole map as an accessible grid; there is no separate
+// availability XHR to intercept (verified against the live site 2026-07: the
+// only JSON in flight is queue/consent/analytics noise). Markup:
+//
+//   <div role="grid" aria-label="Seat Selection Map">
+//     <div role="row"><div role="gridcell">
+//       <label><input disabled aria-label="Occupied AMC Club Rocker A33"></label>
+//       <label><input aria-label="AMC Club Rocker C10"></label>   <- available
+//
+// Occupied seats carry an "Occupied" prefix and disabled; available seats are
+// enabled inputs whose label ends in the seat name (e.g. "AMC Club Rocker C10",
+// "Wheelchair Space D1").
 function seatsFromDomInPage() {
-  const nodes = [...document.querySelectorAll('button,[role="button"],[role="checkbox"],[aria-label]')];
+  const inputs = [
+    ...document.querySelectorAll('[role="grid"] [role="gridcell"] input[aria-label], [role="grid"] [role="gridcell"] button[aria-label]'),
+  ];
   const seats = new Map();
-  for (const el of nodes) {
+  for (const el of inputs) {
     const label = (el.getAttribute('aria-label') || '').trim();
-    // e.g. "Seat C12, available", "C12 unavailable", "Row C Seat 12 - occupied"
-    const m = /^(?:row\s*)?(?:seat\s*)?([A-Z]{1,3})\s*(?:seat)?\s*-?\s*(\d{1,3})\b/i.exec(label);
+    const m = /([A-Z]{1,3}\s?-?\d{1,3})\s*$/.exec(label);
     if (!m) continue;
-    if (!/seat|row/i.test(label) && !/^[A-Z]{1,3}\d{1,3}\b/.test(label)) continue;
-    const name = `${m[1].toUpperCase()}${m[2]}`;
-    const unavailable =
-      /unavailable|occupied|taken|reserved|sold|not available/i.test(label) ||
+    const name = m[1].replace(/[\s-]+/g, '');
+    const occupied =
+      /^(occupied|unavailable|reserved|sold)/i.test(label) ||
       el.disabled === true ||
       el.getAttribute('aria-disabled') === 'true';
-    seats.set(name, !unavailable);
+    // A seat can appear once; occupied wins if duplicated.
+    seats.set(name, seats.has(name) ? seats.get(name) && !occupied : !occupied);
   }
   if (seats.size < 5) return null;
   const open = [...seats.entries()].filter(([, ok]) => ok).map(([n]) => n);
@@ -344,15 +357,17 @@ export async function fetchSeatMap(showtimeId) {
   const url = `${config.baseUrl}/showtimes/${showtimeId}/seats`;
   const { page, payloads } = await openPage(url);
   try {
-    // Give the seat map a moment beyond base settle; it renders client-side.
     await page.waitForTimeout(2000);
-    let result = seatsFromPayloads(payloads);
+    // DOM first (the map is server-rendered; see seatsFromDomInPage). The
+    // payload scan is a secondary path in case AMC moves seat data into an
+    // XHR/flight response in a future site version.
+    let result = await page.evaluate(seatsFromDomInPage);
     if (!result) {
-      result = await page.evaluate(seatsFromDomInPage);
-      if (result) log.warn(`seat map ${showtimeId}: payload parse failed, used DOM fallback`);
+      result = seatsFromPayloads(payloads);
+      if (result) log.warn(`seat map ${showtimeId}: DOM parse failed, used payload fallback`);
     }
     if (!result) {
-      log.warn(`seat map ${showtimeId}: could not parse seats from payloads (${payloads.length}) or DOM`);
+      log.warn(`seat map ${showtimeId}: could not parse seats from DOM or payloads (${payloads.length})`);
       return null;
     }
     return { ...result, url };

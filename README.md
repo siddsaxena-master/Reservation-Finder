@@ -27,9 +27,16 @@ Sat Aug 22, 7:00 PM
   showtime**. The monitor polls that (cheap, one page per date) and diffs
   against last known state.
 - When a sold-out show flips to available, it opens that showtime's **seat map**
-  once to confirm and count exact seats (and seat numbers when exposed),
-  preferring the JSON/RSC payload the page fires, with a DOM fallback — then
-  alerts.
+  once to confirm and count exact seats (and seat numbers when exposed) — then
+  alerts. The seats page server-renders the whole map as an accessible grid
+  (`input aria-label="Occupied … A33"`), with **no separate availability
+  XHR** (verified live 2026-07), so DOM parsing is the primary source; a
+  payload scanner remains as fallback in case AMC moves seat data into
+  JSON/flight responses later.
+- AMC sometimes fronts pages with a **Queue-it waiting room** ("Global Safety
+  Net"). With no real event running it auto-advances in seconds and sets a
+  session cookie; the monitor waits it out (up to `QUEUE_WAIT_MS`, default
+  90s) and only counts an unmoving queue as a blocked cycle.
 - State lives in a **local JSON file** (`data/state.json`), written atomically.
   *Why not Supabase:* this is one process on one droplet tracking a few KB of
   showtime records; a hosted database adds credentials, latency, and an outage
@@ -147,6 +154,11 @@ deploy/
 
 - Logs: every cycle logs timestamp, dates checked, tracked/sold-out/available
   counts, and alerts sent. `--verbose` (or `VERBOSE=1`) adds per-page detail.
+- "Ghost" showtimes: AMC occasionally lists shows whose seat map renders
+  fully occupied even though the listing shows no SOLD OUT badge (not on
+  sale / blocked buyouts — observed on late-night marathon slots). The
+  seat-map confirmation step keeps these from producing false seat-open
+  alerts; they may appear as "available" in `/status` until they go on sale.
 - The Telegram long-poll and the scrape loop are independent; a Telegram
   outage never stops scraping, and vice versa.
 - If AMC changes markup: `scraper.js` is the only file to touch. The listing
