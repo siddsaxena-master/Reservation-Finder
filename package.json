@@ -1,0 +1,23 @@
+{
+  "name": "amc-70mm-monitor",
+  "version": "1.0.0",
+  "description": "Seat-availability monitor for AMC IMAX 70mm screenings (The Odyssey @ AMC Lincoln Square 13) with Telegram alerts",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "node src/index.js --once",
+    "verbose": "node src/index.js --once --verbose"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/siddsaxena-master/Reservation-Finder"
+  },
+  "license": "ISC",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.56.0"
+  }
+}
